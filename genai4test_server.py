@@ -7,6 +7,8 @@ from mcp.server.fastmcp import FastMCP
 from urllib.parse import quote
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
+from urllib.parse import quote, urlparse, urljoin
+import base64
 
 # --- Config via env ---
 BASE_URL = os.getenv("GENAI4TEST_BASE_URL",
@@ -77,7 +79,8 @@ def tool_manifest() -> Dict[str, Any]:
 @app.tool()
 def health() -> Dict[str, Any]:
     try:
-        r = requests.get(f"{BASE_URL}/docs", timeout=TIMEOUT_S, verify=VERIFY_SSL)
+        verify_arg = CA_BUNDLE if CA_BUNDLE else bool(VERIFY_SSL)
+        r = requests.get(f"{BASE_URL}/docs", timeout=30, verify=verify_arg)
         return {"ok": r.ok, "status_code": r.status_code}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
@@ -174,12 +177,21 @@ def run_bug_test(bug_no: str, email: str | None = None, agent: str | None = None
                     "error": f"HTTP {resp.status_code}", "body": body}
 
         data = resp.json()
+
+        script = data.get("sql") or data.get("code") or data.get("script")
+        file_url = data.get("file_url")
+        abs_url = None
+        if isinstance(file_url, str) and file_url:
+            # tolerate relative paths like "download-file/..." or "/download-file/..."
+            abs_url = urljoin(BASE_URL.rstrip("/") + "/", file_url)
+
         return {
             "ok": True,
             "request_url": url,
             "summary": data.get("summary"),
-            "sql": data.get("sql"),
-            "file_url": data.get("file_url"),
+            "sql": script,                    # <-- key your Slack code already expects
+            "file_url": file_url,
+            "absolute_file_url": abs_url,     # <-- optional convenience
         }
     except requests.exceptions.ReadTimeout as e:
         return {"ok": False, "error": f"ReadTimeout: {e}", "request_url": url}

@@ -9,7 +9,7 @@ import tempfile as TF
 import threading
 import subprocess
 import requests
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse, urljoin
 
 from dotenv import load_dotenv
 from slack_bolt import App
@@ -82,42 +82,62 @@ def _chunk_text(s: str, limit: int = 2800) -> list[str]:
     return parts or [s]
 
 
-def post_with_feedback(app, channel_id: str, thread_ts: str | None, text: str, *,
-                       context: dict | None = None) -> str:
+# --- app.py ---
+
+def _chunk_text(s: str, limit: int = 2800) -> list[str]:
+    if len(s) <= limit:
+        return [s]
+    parts, cur, cur_len = [], [], 0
+    for para in s.split("\n\n"):
+        block = para + "\n\n"
+        if cur_len + len(block) > limit and cur:
+            parts.append("".join(cur).rstrip())
+            cur, cur_len = [], 0
+        if len(block) > limit:
+            for line in block.splitlines(keepends=True):
+                if cur_len + len(line) > limit and cur:
+                    parts.append("".join(cur).rstrip())
+                    cur, cur_len = [], 0
+                while len(line) > limit:
+                    parts.append(line[:limit]); line = line[limit:]
+                cur.append(line); cur_len += len(line)
+        else:
+            cur.append(block); cur_len += len(block)
+    if cur:
+        parts.append("".join(cur).rstrip())
+    return parts or [s]
+
+def post_text_chunks(app, channel_id: str, thread_ts: str | None, text: str) -> str:
+    """Post long text as multiple plain messages. Returns ts of the first post."""
+    chunks = _chunk_text(text, limit=2800)
+    first_ts = None
+    for i, c in enumerate(chunks):
+        res = app.client.chat_postMessage(
+            channel=channel_id, thread_ts=thread_ts if i == 0 else first_ts, text=c
+        )
+        if first_ts is None:
+            first_ts = res["ts"]
+    return first_ts or thread_ts
+
+def post_feedback_tail(app, channel_id: str, thread_ts: str | None, *,
+                       text_for_record: str, context: dict | None = None) -> str:
     """
-    Posts a message with thumbs up/down buttons. Returns the message_ts of the FIRST post.
-    If the message is long, it will be chunked: first chunk gets feedback controls,
-    subsequent chunks are sent as plain follow-ups to the same thread.
+    Append a tiny trailing message with 👍👎 buttons.
+    Stores the full 'text_for_record' to feedback.jsonl, but shows only a short label in Slack.
     """
     uid = str(uuid.uuid4())
-    record = {
-        "uuid": uid,
-        "ts": utc_iso(),
-        "context": context or {},
-        "original_text": text,
-    }
+    record = {"uuid": uid, "ts": utc_iso(), "context": context or {}, "original_text": text_for_record}
     append_jsonl(FEEDBACK_PATH, record)
-
     tiny_payload = json.dumps({"uuid": uid})
-    chunks = _chunk_text(text, limit=2800)  # keep headroom under Slack's 3000
 
-    # First chunk with buttons
     res = app.client.chat_postMessage(
         channel=channel_id,
         thread_ts=thread_ts,
-        text=chunks[0],
-        blocks=feedback_blocks(chunks[0], voted=None, payload_json=tiny_payload),
+        text="Rate this answer",
+        blocks=feedback_blocks("Rate this answer", voted=None, payload_json=tiny_payload),
     )
-    head_ts = res["ts"]
+    return res["ts"]
 
-    # Remainder as plain messages (no buttons)
-    for more in chunks[1:]:
-        app.client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=head_ts,   # chain under the first message for neatness
-            text=more,
-        )
-    return head_ts
 
 # ---------------------------------------------------------------------------
 # Helpers (Jenkins + file transfer)
@@ -516,52 +536,60 @@ def handle_app_mention(event, say, client):
                             say(f":x: genai4test error: {res.get('error')} (url: {res.get('request_url')})", thread_ts=thread_ts)
                             return
 
-                        # 1) Summary (with feedback controls)
-                        if res.get("summary"):
-                            post_with_feedback(
-                                app, channel_id, thread_ts,
-                                f"*Summary:*\n{res['summary']}",
-                                context={"feature":"genai4test","tool":"run_bug_test",
-                                        "bug": (_args_for_tool(tool, cleaned).get("bug_no") if '_args_for_tool' in globals() else None)}
-                            )
+                        bug_no = (_args_for_tool(tool, cleaned).get("bug_no") if '_args_for_tool' in globals() else None) or "bug"
+                        pieces_for_record = []  # accumulate for feedback logging
 
-                        # 2) SQL / test script
+                        # 1) Summary (plain posts, chunked)
+                        if res.get("summary"):
+                            ts0 = post_text_chunks(
+                                app, channel_id, thread_ts,
+                                f"*Summary for bug {bug_no}:*\n{res['summary']}"
+                            )
+                            pieces_for_record.append(res["summary"])
+                        else:
+                            ts0 = thread_ts
+
+                        # 2) SQL / test script (always print and attach if present)
                         sql = res.get("sql")
                         if sql:
-                            # If short enough, send as a separate code-block message (no buttons).
-                            if len(sql) < 2400:
-                                app.client.chat_postMessage(
-                                    channel=channel_id,
-                                    thread_ts=thread_ts,
-                                    text=f"*Generated Test Script / SQL:*\n```{sql}```",
-                                )
-                            else:
-                                # Upload as a file to avoid block limits
-                                try:
-                                    bug_no = (_args_for_tool(tool, cleaned).get("bug_no") if '_args_for_tool' in globals() else None) or "bug"
-                                    with TF.NamedTemporaryFile(delete=False, suffix=f"_{bug_no}.sql") as tmp:
-                                        tmp.write(sql.encode("utf-8", errors="ignore"))
-                                        tmp_path = tmp.name
-                                    app.client.files_upload_v2(
-                                        channels=[channel_id],
-                                        thread_ts=thread_ts,
-                                        initial_comment="Generated Test Script / SQL (attached as file):",
-                                        file=tmp_path,
-                                        filename=f"{bug_no}.sql",
-                                        title=f"{bug_no}.sql",
-                                    )
-                                finally:
-                                    try: OS.unlink(tmp_path)
-                                    except Exception: pass
-
-                        # 3) Optional: link to packaged artifact
-                        if res.get("file_url"):
+                            pieces_for_record.append(f"[script length={len(sql)}]")
+                            # Post a code block in-thread (chunked post already used above for summary)
+                            preview = sql if len(sql) <= 2400 else (sql[:2400] + "\n-- [truncated]")
                             app.client.chat_postMessage(
                                 channel=channel_id,
-                                thread_ts=thread_ts,
-                                text=f"<{res['file_url']}|Download generated package>",
+                                thread_ts=ts0,
+                                text=f"*Generated Test Script ({bug_no}.sql):*\n```{preview}```",
                             )
-                        return
+
+                            # Always attach as a file too (so users can download/forward it)
+                            try:
+                                with TF.NamedTemporaryFile(delete=False, suffix=f"_{bug_no}.sql") as tmp:
+                                    tmp.write(sql.encode("utf-8", errors="ignore"))
+                                    tmp_path = tmp.name
+                                app.client.files_upload_v2(
+                                    channels=[channel_id],
+                                    thread_ts=ts0,
+                                    initial_comment="Full script attached:",
+                                    file=tmp_path,
+                                    filename=f"{bug_no}.sql",
+                                    title=f"{bug_no}.sql",
+                                )
+                            finally:
+                                try: OS.unlink(tmp_path)
+                                except Exception: pass
+                        else:
+                            app.client.chat_postMessage(
+                                channel=channel_id,
+                                thread_ts=ts0,
+                                text=":warning: The test-generation service returned no script payload.",
+                            )
+
+                        # 4) One feedback widget at the end (unchanged)
+                        post_feedback_tail(
+                            app, channel_id, ts0,
+                            text_for_record="\n\n".join(pieces_for_record) or "(no content)",
+                            context={"feature":"genai4test","tool":"run_bug_test","bug": bug_no}
+                        )
                     return
             except Exception as e:
                 say(f":x: Router dispatch error: {e}", thread_ts=thread_ts)
