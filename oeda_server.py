@@ -30,10 +30,16 @@ _RACK_PAT1 = re.compile(r"rack\s*description:\s*(?P<desc>.+)", re.I)
 _RACK_PAT2 = re.compile(r"deduced\s+rackDescription\s+to:\s*(?P<desc>.+)", re.I)
 _XVER_ANY = re.compile(r"\bX\s*(\d+)\b", re.I)
 _X_MODEL_RE = re.compile(r"\bX\s*(\d+)", re.I)
+os.environ["OEDA_ILOM_SSH"] = "1"
+os.environ["OEDA_ILOM_USER"] = "root"
+# Add your ILOM password here if needed
+os.environ["OEDA_ILOM_PASS"] = "Ed1s_P0#&G"
 ILOM_USER    = os.getenv("OEDA_ILOM_USER", "root")
 ILOM_PASS    = os.getenv("OEDA_ILOM_PASS")         # prefer passing via env, not hard-coded
 ILOM_TIMEOUT = int(os.getenv("OEDA_ILOM_TIMEOUT", "8"))
 ILOM_ENABLED = os.getenv("OEDA_ILOM_SSH", "0") == "1"
+
+
 
 
 _COMPUTE_RE = re.compile(r"\b([a-z0-9\-\.]*?adm\d{2}(?:\.[\w\.-]+)?)\b", re.I)
@@ -295,6 +301,11 @@ def generate_oedaxml(
             out["note"] = "genoedaxml_path not provided; returning JSON only."
         return out
 
+    if live_mig and out.get("live_mig_check") == "fail":
+        if debug:
+            out["note"] = "Skipping XML generation due to hardware compatibility check failure."
+        return out
+
     # allowlist
     if not _is_allowed_path(genoedaxml_path):
         out["error"] = "genoedaxml_path not allowed by OEDA_GENOEDAXML_ALLOWLIST"
@@ -393,11 +404,90 @@ def tool_manifest() -> Dict[str, Any]:
                 "name": "generate_oedaxml",
                 "description": "Generate OEDA es.xml and/or minconfig.json from natural language.",
                 "intents": ["oeda", "oedaxml", "es.xml", "exadata xml", "generate xml"],
-                "patterns": [r"\bgenerate\s+oedaxml\b", r"\bconfig+xml\b", r"\boeda\b", r"\bxml\b"]
+                "patterns": [r"\bgenerate\s+oedaxml\b", r"\bconfig+xml\b", r"\bcreate\s+oedaxml\b"]
             }
         ]
     }
 
+# Add this to your oeda_server.py for testing
+@app.tool() 
+def test_ilom_connectivity(request: str) -> Dict[str, Any]:
+    """Debug tool to test ILOM connectivity and hardware detection"""
+    comp = _first_compute_host(request)
+    if not comp:
+        return {"error": "No compute host found in request"}
+    
+    ilom = _ilom_host_for_compute(comp)
+    status, prod, reason = _probe_ilom_product_name(request)
+    
+    return {
+        "compute_host": comp,
+        "ilom_host": ilom, 
+        "ilom_enabled": ILOM_ENABLED,
+        "status": status,
+        "product_name": prod,
+        "reason": reason,
+        "raw_request": request
+    }
+
+
+@app.tool()
+def debug_ilom_check(request: str) -> Dict[str, Any]:
+    """
+    Debug tool to check ILOM connectivity and hardware detection.
+    Use this to see exactly what's happening with the X10+ check.
+    """
+    live_mig = _is_live_migration_req(request)
+    comp = _first_compute_host(request)
+    
+    debug_info = {
+        "request": request,
+        "live_migration_detected": live_mig,
+        "ilom_enabled": ILOM_ENABLED,
+        "ilom_user": ILOM_USER,
+        "ilom_timeout": ILOM_TIMEOUT,
+        "compute_host": comp,
+        "ilom_host": _ilom_host_for_compute(comp) if comp else None,
+        "env_vars": {
+            "OEDA_ILOM_SSH": os.getenv("OEDA_ILOM_SSH"),
+            "OEDA_ILOM_USER": os.getenv("OEDA_ILOM_USER"),
+            "OEDA_ILOM_PASS": "Ed1s_P0#&G" if os.getenv("OEDA_ILOM_PASS") else None,
+            "OEDA_ILOM_TIMEOUT": os.getenv("OEDA_ILOM_TIMEOUT"),
+        }
+    }
+    
+    if not comp:
+        debug_info["error"] = "No compute host found in request"
+        return debug_info
+    
+    ilom_host = _ilom_host_for_compute(comp)
+    debug_info["ilom_host"] = ilom_host
+    
+    # Test ILOM connectivity
+    if ILOM_ENABLED:
+        try:
+            status, prod, reason = _probe_ilom_product_name(request)
+            debug_info["ilom_probe_result"] = {
+                "status": status,
+                "product_name": prod,
+                "reason": reason
+            }
+            
+            # Also test raw SSH command
+            rc, out, err = _ssh_run(ilom_host, "show /SYS")
+            debug_info["raw_ssh_test"] = {
+                "return_code": rc,
+                "stdout_preview": out[:500] if out else None,
+                "stderr_preview": err[:500] if err else None,
+                "ssh_command": f"ssh {ILOM_USER}@{ilom_host} 'show /SYS'"
+            }
+            
+        except Exception as e:
+            debug_info["ilom_error"] = str(e)
+    else:
+        debug_info["ilom_disabled"] = "OEDA_ILOM_SSH is not set to '1'"
+    
+    return debug_info
 
 if __name__ == "__main__":
     app.run()

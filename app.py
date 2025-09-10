@@ -138,7 +138,6 @@ def post_feedback_tail(app, channel_id: str, thread_ts: str | None, *,
     )
     return res["ts"]
 
-
 # ---------------------------------------------------------------------------
 # Helpers (Jenkins + file transfer)
 # ---------------------------------------------------------------------------
@@ -454,14 +453,41 @@ def handle_app_mention(event, say, client):
                     # minimal display per tool (reuse your existing display blocks)
                     if tool == "generate_oedaxml":
                         status = res.get("live_mig_check")
-                        prod   = res.get("ilom_product_name") or "N/A"
+                        prod   = res.get("ilom_product_name") or "unknown"
                         reason = res.get("live_mig_reason") or ""
-
                         if status == "fail":
-                            say(f":no_entry: {reason}\nILOM product_name: `{prod}`", thread_ts=thread_ts)
+                            # User-friendly error message
+                            friendly_msg = (
+                                f":no_entry: **Hardware Compatibility Issue**\n\n"
+                                f"The hardware `{prod}` doesn't meet the minimum requirements for live migration. "
+                                f"Live migration requires **X10 or newer** hardware (or equivalent E5+ series).\n\n"
+                                f"**Solutions:**\n"
+                                f"• Use X10, X11, X12, or newer Exadata hardware\n"
+                                f"• Remove 'live migration' from your request for standard deployment\n"
+                                f"• Contact ExaBoard team for X10+ hardware allocation"
+                            )
+                            say(friendly_msg, thread_ts=thread_ts)
+                            post_feedback_tail(
+                                app, channel_id, thread_ts,
+                                text_for_record="\n\n".join(friendly_msg) or "(no content)",
+                                context={"feature": "oeda", "tool": "generate_oedaxml"}
+                            )
                             return
                         elif status == "unknown" and res.get("live_migration"):
-                            say(f":information_source: {reason}\nILOM product_name: `{prod}`", thread_ts=thread_ts)
+                            # Warning for unknown hardware status
+                            warning_msg = (
+                                f":information_source: **Hardware Check Warning**\n\n"
+                                f"Could not verify hardware compatibility for live migration.\n"
+                                f"Detected hardware: `{prod}`\n"
+                                f"Reason: {reason}\n\n"
+                                f"Proceeding with XML generation, but **please verify** your hardware supports live migration before deployment."
+                            )
+                            say(warning_msg, thread_ts=thread_ts)
+                            post_feedback_tail(
+                                app, channel_id, thread_ts,
+                                text_for_record="\n\n".join(warning_msg) or "(no content)",
+                                context={"feature": "oeda", "tool": "generate_oedaxml"}
+                            )
 
                         minconfig = res.get("minconfig_json", {})
                         es_path   = res.get("es_xml_path")
@@ -472,9 +498,8 @@ def handle_app_mention(event, say, client):
                         if es_path: msg += f"\n\n*XML output path:* `{es_path}`"
                         if err:     msg += f"\n\n:warning: *OEDA error:* {err}"
                         if not es_path and es_err: msg += f"\n\n:x: *genOEDA XML failed:* `{es_err}`"
-                        post_with_feedback(app, channel_id, thread_ts, msg,
-                            context={"feature":"oeda","tool":tool,"args":{"has_xml":bool(es_path)}}
-                        )
+                        say(msg, thread_ts=thread_ts)
+                        pieces_for_record = [msg]
                         # upload inline xml if present (same as you have)
                         es_b64 = res.get("es_xml_b64")
                         if es_b64:
@@ -492,10 +517,21 @@ def handle_app_mention(event, say, client):
                                 f"1. `cd oss/test/tsage/sosd` \n"
                                 f"2. `run doimageoeda.sh -xml [your/xml/path] -error_report -skip_ahf -remote -skip_qinq_checks_cell`",
                                     thread_ts=thread_ts)
-
+                        post_feedback_tail(
+                            app, channel_id, thread_ts,
+                            text_for_record="\n\n".join(pieces_for_record) or "(no content)",
+                            context={"feature": "oeda", "tool": "generate_oedaxml"}
+                        )
+                        return
                     elif tool == "status":
-                        post_with_feedback(app, channel_id, thread_ts, res.get("status","[No status]"),
-                            context={"feature":"runintegration","tool":"status"})
+                        text = res.get("status","[No status]")
+                        say(text, thread_ts=thread_ts)
+                        post_feedback_tail(
+                            app, channel_id, thread_ts,
+                            text_for_record=text,
+                            context={"feature":"runintegration","tool":"status"}
+                        )
+                        return
 
                     elif tool == "idle_envs":
                         idle = res.get("idle_envs", [])
@@ -507,8 +543,13 @@ def handle_app_mention(event, say, client):
                             else:
                                 lines = [f"• `{e}`" for e in idle]
                             msg = "*🟢 Idle environments:*\n" + "\n".join(lines)
-                            post_with_feedback(app, channel_id, thread_ts, msg,
-                                context={"feature":"runintegration","tool":"idle_envs"})
+                            say(msg, thread_ts=thread_ts)
+                            pieces_for_record = [msg]
+                            post_feedback_tail(
+                                app, channel_id, thread_ts,
+                                text_for_record="\n\n".join(pieces_for_record) or "(no content)",
+                                context={"feature": "runintegration", "tool": "idle_envs"}
+                            )
                         else:
                             say(f":warning: Unexpected idle envs format: {type(idle).__name__}", thread_ts=thread_ts)
 
@@ -518,15 +559,25 @@ def handle_app_mention(event, say, client):
                             say("No disabled environments found.", thread_ts=thread_ts)
                         else:
                             msg = "*Disabled RunIntegration envs:*\n" + "\n".join(f"• `{e}`" for e in items)
-                            post_with_feedback(app, channel_id, thread_ts, msg,
-                                context={"feature":"runintegration","tool":"disabled_envs"})
-
+                            say(msg, thread_ts=thread_ts)
+                            pieces_for_record = [msg]
+                            post_feedback_tail(
+                                app, channel_id, thread_ts,
+                                text_for_record="\n\n".join(pieces_for_record) or "(no content)",
+                                context={"feature": "runintegration", "tool": "disabled_envs"}
+                            )
                     elif tool == "rag_query":
                         ans  = res.get("answer","[no answer]")
                         srcs = res.get("sources", []) or []
                         src_lines = "\n".join(f"• {s.get('title','untitled')} ({s.get('source') or 'n/a'})" for s in srcs)
-                        post_with_feedback(app, channel_id, thread_ts, f"{ans}\n\n*Sources:*\n{src_lines or '—'}",
-                            context={"feature":"rag","tool":"rag_query"})
+                        msg = f"{ans}\n\n*Sources:*\n{src_lines or '—'}"
+                        say(msg, thread_ts=thread_ts)
+                        post_feedback_tail(
+                            app, channel_id, thread_ts,
+                            text_for_record=msg,
+                            context={"feature":"rag","tool":"rag_query"}
+                        )
+                        return
 
                     elif tool == "lc_summarize_text":
                         post_with_feedback(app, channel_id, thread_ts, f"*Summary:*\n{res.get('summary','[no summary]')}",
@@ -652,12 +703,13 @@ def handle_app_mention(event, say, client):
             }
 
             res = OEDA_CLIENT.call_tool("generate_oedaxml", payload)
-            # Check hardware support for live migration
-            if res.get("live_mig_check") == "fail":  # <-- you can set this flag in your genoedaxml agent
-                rack_desc = res.get("rack_desc", "N/A")
-                say((":no_entry: Live migration requires X10 or newer hardware.\n"
-                    f"Detected rackDescription: `{rack_desc}`"), thread_ts=thread_ts)
+
+            if res.get("live_mig_check") == "fail":
+                prod = res.get("ilom_product_name", "Unknown")
+                reason = res.get("live_mig_reason", "Hardware compatibility check failed")
+                say(f":no_entry: {reason}\nILOM product_name: `{prod}`", thread_ts=thread_ts)
                 return
+
             minconfig = res.get("minconfig_json", {})
             es_path   = res.get("es_xml_path")
             es_b64    = res.get("es_xml_b64")

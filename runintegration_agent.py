@@ -3,8 +3,6 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
-
 RUNTABLE_PATH = "/net/10.32.19.91/export/exadata_images/ImageTests/daily_runs_1/OSS_MAIN/runtable"
 CONNECT_FILE = "/net/10.32.19.91/export/exadata_images/ImageTests/.pxeqa_connect"
 
@@ -53,7 +51,6 @@ def check_marker_status(entry: str, ssh_timeout: int = 3) -> str | None:
     try:
         out = subprocess.check_output(ssh_common + [remote], stderr=subprocess.DEVNULL, text=True).strip()
     except subprocess.CalledProcessError:
-        # unreachable host → treat as idle
         return None
 
     if not out or out.startswith("IDLE"):

@@ -28,13 +28,13 @@ app = FastMCP("genai4test-mcp")
 # 1) A “wide” detector for intent: request to generate/create/help with test for a bug
 INTENT_PATTERNS = [
     # can you help me generate the test for bug 12345678
-    r"\b(can\s+you\s+help|help\s+me)\b.*\b(generate|create|make)\b.*\b(test|script)\b.*\bbug\s*#?\s*(\d{6,})\b",
+    r"\b(can\s+you\s+help|help\s+me)\b.*\b(generate|create|make)\b.*\b(test|script|summary)\b.*\bbug\s*#?\s*(\d{6,})\b",
     # help me generate test for bug 12345678
-    r"\bhelp\s+me\b.*\b(generate|create|make)\b.*\b(test|script)\b.*\bbug\s*#?\s*(\d{6,})\b",
+    r"\bhelp\s+me\b.*\b(generate|create|make)\b.*\b(test|script|summary)\b.*\bbug\s*#?\s*(\d{6,})\b",
     # create a test for bug 12345678
-    r"\b(create|generate|make)\b.*\b(test|script)\b.*\bbug\s*#?\s*(\d{6,})\b",
+    r"\b(create|generate|make)\b.*\b(test|script|summary)\b.*\bbug\s*#?\s*(\d{6,})\b",
     # simpler fallback: "... bug 12345678 ..." with "test"
-    r"\b(test|script)\b.*\bbug\s*#?\s*(\d{6,})\b",
+    r"\b(test|script|summary)\b.*\bbug\s*#?\s*(\d{6,})\b",
 ]
 
 # 2) A focused extractor for the bug number (works on most phrasing)
